@@ -137,3 +137,10 @@ report/
 .log
 .xls
 adblog/
+
+# SSH Keys
+*github ssh*
+*.pub
+
+# Project specific
+solox/analytics/
