@@ -5,6 +5,8 @@ on:
     branches: [ master ]
   pull_request:
     branches: [ master ]
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly security scan
 
 jobs:
   test:
@@ -13,34 +15,51 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         python-version: ['3.8', '3.9', '3.10']
+      fail-fast: false  # Continue with other jobs if one fails
 
     steps:
     - uses: actions/checkout@v3
+      with:
+        fetch-depth: 0  # Fetch all history for coverage reports
     
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v4
       with:
         python-version: ${{ matrix.python-version }}
+        cache: 'pip'  # Enable pip caching
         
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        pip install pytest pytest-cov
+        pip install pytest pytest-cov pytest-xdist pytest-benchmark pytest-timeout pytest-randomly
         
     - name: Run unit tests
       run: |
-        pytest tests/device_management/test_device_pool.py tests/device_management/test_device_manager.py -v --cov=solox.device_management
+        pytest tests/device_management/test_device_pool.py tests/device_management/test_device_manager.py \
+          -v --cov=solox.device_management -n auto \
+          --timeout=300 --randomly-seed=1234 \
+          --benchmark-only --benchmark-autosave
         
     - name: Run integration tests (if devices available)
       run: |
-        pytest tests/device_management/test_integration.py -v || echo "No devices available for integration testing"
+        pytest tests/device_management/test_integration.py -v --cov-append || echo "No devices available for integration testing"
       continue-on-error: true
       
     - name: Upload coverage reports
       uses: codecov/codecov-action@v3
       with:
         fail_ci_if_error: false
+        
+    - name: Upload benchmark results
+      uses: benchmark-action/github-action-benchmark@v1
+      with:
+        tool: 'pytest'
+        output-file-path: .benchmarks/Linux-CPython-3.10-benchmark.json
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        auto-push: true
+        alert-threshold: '150%'
+        comment-on-alert: true
 
   lint:
     runs-on: ubuntu-latest
@@ -52,21 +71,97 @@ jobs:
       uses: actions/setup-python@v4
       with:
         python-version: '3.10'
+        cache: 'pip'
         
     - name: Install linting tools
       run: |
         python -m pip install --upgrade pip
-        pip install flake8 black isort mypy
+        pip install flake8 black isort mypy pylint bandit ruff
         
     - name: Check code formatting
       run: |
         black --check solox/device_management
         isort --check-only solox/device_management
         
+    - name: Lint with ruff
+      run: |
+        ruff check solox/device_management
+        
     - name: Lint with flake8
       run: |
         flake8 solox/device_management --count --max-complexity=10 --max-line-length=100 --statistics
         
+    - name: Lint with pylint
+      run: |
+        pylint solox/device_management --fail-under=8.0
+        
     - name: Type check with mypy
       run: |
-        mypy solox/device_management 
+        mypy solox/device_management --strict
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+
+    - name: Security scan with bandit
+      run: |
+        pip install bandit
+        bandit -r solox/device_management -ll -ii
+
+    - name: Run dependency vulnerability scan
+      uses: pypa/gh-action-pip-audit@v1.0.8
+      with:
+        inputs: requirements.txt
+
+    - name: Run SAST
+      uses: github/codeql-action/init@v2
+      with:
+        languages: python
+        queries: security-and-quality
+    - uses: github/codeql-action/analyze@v2
+
+    - name: Run Snyk to check for vulnerabilities
+      uses: snyk/actions/python@master
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        args: --severity-threshold=high
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+
+    - name: Install documentation tools
+      run: |
+        pip install sphinx sphinx-rtd-theme sphinx-autodoc-typehints sphinx-copybutton
+
+    - name: Build documentation
+      run: |
+        cd docs
+        make html
+
+    - name: Check documentation links
+      run: |
+        cd docs
+        make linkcheck
+
+    - name: Deploy documentation
+      uses: peaceiris/actions-gh-pages@v3
+      if: github.ref == 'refs/heads/master'
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./docs/_build/html 
