@@ -93,9 +93,8 @@ class DTXPayload:
             assert h.total_length == 0
             return flags, None
         else:
-            return flags, "Unknown data"
-            # pass
-            # raise MuxError("Unknown flags", flags)
+            logger.warning(f"Unknown DTXPayload flags: {flags}")
+            return flags, f"Unknown flags: {flags}"
     
     @staticmethod
     def build(identifier: str, args: Union[list, "AUXMessageBuffer"] = []) -> bytes:

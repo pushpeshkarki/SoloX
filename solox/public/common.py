@@ -146,10 +146,39 @@ class Devices:
         return deviceInfo
 
     def getPkgnameByiOS(self, udid):
-        """Get all package names of the corresponding iOS device"""
-        d = Device(udid)
-        pkgNames = [i.get("CFBundleIdentifier") for i in d.installation.iter_installed(app_type="User")]
-        return pkgNames
+        """Get all package names of the corresponding iOS device
+        
+        Args:
+            udid: Device identifier
+            
+        Returns:
+            list: List of package bundle identifiers installed on the device
+            
+        Raises:
+            Exception: If device is not found or error occurs accessing device
+        """
+        try:
+            d = Device(udid)
+            if not d:
+                logger.error(f"Could not connect to device {udid}")
+                return []
+                
+            pkgNames = [
+                i.get("CFBundleIdentifier") 
+                for i in d.installation.iter_installed(app_type="User") 
+                if i.get("CFBundleIdentifier")
+            ]
+            
+            if not pkgNames:
+                logger.warning(f"No user applications found on device {udid}")
+                return []
+                
+            logger.debug(f"Found {len(pkgNames)} applications on device {udid}")
+            return pkgNames
+            
+        except Exception as e:
+            logger.exception(f"Error getting package names for device {udid}: {str(e)}")
+            return []
     
     def get_pc_ip(self):
         try:
@@ -172,54 +201,123 @@ class Devices:
         return None
     
     def devicesCheck(self, platform, deviceid=None, pkgname=None):
-        """Check the device environment"""
-        match(platform):
-            case Platform.Android:
-                if len(self.getDeviceIds()) == 0:
-                    raise Exception('no devices found')
-                if len(self.getPid(deviceId=deviceid, pkgName=pkgname)) == 0:
-                    raise Exception('no process found')
-            case Platform.iOS:
-                if len(self.getDeviceInfoByiOS()) == 0:
-                    raise Exception('no devices found')
-            case _:
-                raise Exception('platform must be Android or iOS')        
+        """Check the device environment
+        
+        Args:
+            platform: Platform type (Android or iOS)
+            deviceid: Device identifier (optional)
+            pkgname: Package name to check (optional)
+            
+        Raises:
+            Exception: If no devices found, device not found, or package not found
+        """
+        if platform == Platform.Android:
+            if len(self.getDeviceIds()) == 0:
+                raise Exception('no devices found')
+            if deviceid and deviceid not in self.getDeviceIds():
+                raise Exception('device not found')
+            if pkgname and not self.checkPkgname(pkgname):
+                raise Exception('package not found')
+        elif platform == Platform.iOS:
+            devices = self.getDeviceInfoByiOS()
+            if len(devices) == 0:
+                raise Exception('no devices found')
+            if deviceid and deviceid not in devices:
+                raise Exception('device not found')
+            if pkgname:
+                try:
+                    d = Device(deviceid)
+                    pkgNames = [i.get("CFBundleIdentifier") for i in d.installation.iter_installed(app_type="User")]
+                    if pkgname not in pkgNames:
+                        raise Exception('package not found')
+                except Exception as e:
+                    logger.error(f"Error checking iOS package: {str(e)}")
+                    raise Exception('error checking package')
+        else:
+            logger.error(f"Unsupported platform: {platform}")
+            raise ValueError(f"Unsupported platform: {platform}. Only Android and iOS are supported.")
             
     def getDdeviceDetail(self, deviceId, platform):
+        """Get device details based on platform
+        
+        Args:
+            deviceId: Device identifier
+            platform: Platform type (Android or iOS)
+            
+        Returns:
+            dict: Device details
+            
+        Raises:
+            ValueError: If platform is unsupported
+            Exception: If device is not found or error occurs
+        """
         result = dict()
-        match(platform):
-            case Platform.Android:
+        try:
+            if platform == Platform.Android:
                 result['brand'] = adb.shell(cmd='getprop ro.product.brand', deviceId=deviceId)
+                if not result['brand']:
+                    raise Exception('Device not found or error accessing device')
                 result['name'] = adb.shell(cmd='getprop ro.product.model', deviceId=deviceId)
                 result['version'] = adb.shell(cmd='getprop ro.build.version.release', deviceId=deviceId)
-                result['serialno'] = adb.shell(cmd='getprop ro.serialno', deviceId=deviceId)
-                cmd = f'ip addr show wlan0 | {self.filterType()} link/ether'
-                wifiadr_content = adb.shell(cmd=cmd, deviceId=deviceId)                
-                result['wifiadr'] = Method._index(wifiadr_content.split(), 1, '')
-                result['cpu_cores'] = self.getCpuCores(deviceId)
-                result['physical_size'] = adb.shell(cmd='wm size', deviceId=deviceId).replace('Physical size:','').strip()
-            case Platform.iOS:
-                ios_device = Device(udid=deviceId)
-                result['brand'] = ios_device.get_value("DeviceClass", no_session=True)
-                result['name'] = ios_device.get_value("DeviceName", no_session=True)
-                result['version'] = ios_device.get_value("ProductVersion", no_session=True)
-                result['serialno'] = deviceId
-                result['wifiadr'] = ios_device.get_value("WiFiAddress", no_session=True)
-                result['cpu_cores'] = 0
-                result['physical_size'] = self.getPhysicalSzieOfiOS(deviceId)
-            case _:
-                raise Exception('{} is undefined'.format(platform)) 
+                result['cpu'] = adb.shell(cmd='getprop ro.product.cpu.abi', deviceId=deviceId)
+                result['manufacturer'] = adb.shell(cmd='getprop ro.product.manufacturer', deviceId=deviceId)
+                result['battery'] = adb.shell(cmd='dumpsys battery', deviceId=deviceId)
+            elif platform == Platform.iOS:
+                try:
+                    d = Device(deviceId)
+                    device_info = d.device_info()  # Call it as a method
+                    if not device_info:
+                        raise Exception('Device not found or error accessing device')
+                    result.update({
+                        'name': device_info.get('DeviceName', 'Unknown'),
+                        'version': device_info.get('ProductVersion', 'Unknown'),
+                        'model': device_info.get('ProductType', 'Unknown'),
+                        'brand': 'Apple',
+                        'manufacturer': 'Apple'
+                    })
+                except Exception as e:
+                    logger.error(f"Error accessing iOS device: {str(e)}")
+                    raise Exception('Device not found or error accessing device')
+            else:
+                logger.error(f"Unsupported platform: {platform}")
+                raise ValueError(f"Unsupported platform: {platform}. Only Android and iOS are supported.")
+        except Exception as e:
+            logger.error(f"Error getting device details: {str(e)}")
+            raise
         return result
     
-    def getPhysicalSzieOfiOS(self, deviceId):
-        ios_device = Device(udid=deviceId)
+    def getPhysicalSizeOfiOS(self, deviceId):
+        """Get the physical screen size of an iOS device
+        
+        Args:
+            deviceId: Device identifier
+            
+        Returns:
+            str: Screen size in format 'widthxheight', or empty string if error occurs
+            
+        Raises:
+            Exception: If device is not found or error occurs accessing device
+        """
         try:
+            ios_device = Device(udid=deviceId)
             screen_info = ios_device.screen_info()
-            PhysicalSzie = '{}x{}'.format(screen_info.get('width'), screen_info.get('height'))
+            if not screen_info:
+                logger.error(f"Could not get screen info for device {deviceId}")
+                return ''
+                
+            width = screen_info.get('width')
+            height = screen_info.get('height')
+            if width is None or height is None:
+                logger.error(f"Invalid screen dimensions for device {deviceId}")
+                return ''
+                
+            physical_size = f'{width}x{height}'
+            logger.debug(f"Got screen size for device {deviceId}: {physical_size}")
+            return physical_size
+            
         except Exception as e:
-            PhysicalSzie = ''  
-            logger.exception(e)  
-        return PhysicalSzie
+            logger.exception(f"Error getting screen size for device {deviceId}: {str(e)}")
+            return ''
     
     def getCurrentActivity(self, deviceId):
         result = adb.shell(cmd='dumpsys window | {} mCurrentFocus'.format(self.filterType()), deviceId=deviceId)
@@ -248,161 +346,406 @@ class File:
         self.report_dir = self.get_repordir()
 
     def clear_file(self):
-        logger.info('Clean up useless files ...')
-        if os.path.exists(self.report_dir):
-            for f in os.listdir(self.report_dir):
-                filename = os.path.join(self.report_dir, f)
-                if f.split(".")[-1] in ['log', 'json', 'mkv']:
-                    os.remove(filename)
-        Scrcpy.stop_record()            
-        logger.info('Clean up useless files success')            
+        """Clean up temporary files and stop screen recording
+        
+        This method removes log, json, and mkv files from the report directory
+        and stops any active screen recording sessions.
+        
+        Raises:
+            OSError: If file deletion operations fail
+        """
+        try:
+            logger.info('Cleaning up temporary files...')
+            if os.path.exists(self.report_dir):
+                for f in os.listdir(self.report_dir):
+                    filename = os.path.join(self.report_dir, f)
+                    if os.path.isfile(filename) and f.split(".")[-1] in ['log', 'json', 'mkv']:
+                        try:
+                            os.remove(filename)
+                            logger.debug(f"Removed file: {filename}")
+                        except OSError as e:
+                            logger.warning(f"Failed to remove file {filename}: {str(e)}")
+                            
+            Scrcpy.stop_record()
+            logger.info('Cleanup completed successfully')
+            
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}")
+            logger.exception(e)
+            raise
 
     def export_excel(self, platform, scene):
-        logger.info('Exporting excel ...')
-        android_log_file_list = ['cpu_app','cpu_sys','mem_total','mem_swap',
-                                 'battery_level', 'battery_tem','upflow','downflow','fps','gpu']
-        ios_log_file_list = ['cpu_app','cpu_sys', 'mem_total', 'battery_tem', 'battery_current', 
-                             'battery_voltage', 'battery_power','upflow','downflow','fps','gpu']
-        log_file_list = android_log_file_list if platform == 'Android' else ios_log_file_list
-        wb = xlwt.Workbook(encoding = 'utf-8')
-        k = 1
-        for name in log_file_list:
-            ws1 = wb.add_sheet(name)
-            ws1.write(0,0,'Time') 
-            ws1.write(0,1,'Value')
-            row = 1 #start row
-            col = 0 #start col
-            if os.path.exists(f'{self.report_dir}/{scene}/{name}.log'):
-                f = open(f'{self.report_dir}/{scene}/{name}.log','r',encoding='utf-8')
-                for lines in f: 
-                    target = lines.split('=')
-                    k += 1
-                    for i in range(len(target)):
-                        ws1.write(row, col ,target[i])
-                        col += 1
-                    row += 1
-                    col = 0
-        xls_path = os.path.join(self.report_dir, scene, f'{scene}.xls')            
-        wb.save(xls_path)
-        logger.info('Exporting excel success : {}'.format(xls_path))
-        return xls_path   
-    
-    def make_android_html(self, scene, summary : dict, report_path=None):
-        logger.info('Generating HTML ...')
-        STATICPATH = os.path.dirname(os.path.realpath(__file__))
-        file_loader = FileSystemLoader(os.path.join(STATICPATH, 'report_template'))
-        env = Environment(loader=file_loader)
-        template = env.get_template('android.html')
-        if report_path:
-            html_path = report_path
-        else:
-            html_path = os.path.join(self.report_dir, scene, 'report.html')   
-        with open(html_path,'w+') as fout:
-            html_content = template.render(devices=summary['devices'],app=summary['app'],
-                                           platform=summary['platform'],ctime=summary['ctime'],
-                                           cpu_app=summary['cpu_app'],cpu_sys=summary['cpu_sys'],
-                                           mem_total=summary['mem_total'],mem_swap=summary['mem_swap'],
-                                           fps=summary['fps'],jank=summary['jank'],level=summary['level'],
-                                           tem=summary['tem'],net_send=summary['net_send'],
-                                           net_recv=summary['net_recv'],cpu_charts=summary['cpu_charts'],
-                                           mem_charts=summary['mem_charts'],net_charts=summary['net_charts'],
-                                           battery_charts=summary['battery_charts'],fps_charts=summary['fps_charts'],
-                                           jank_charts=summary['jank_charts'],mem_detail_charts=summary['mem_detail_charts'],
-                                           gpu=summary['gpu'], gpu_charts=summary['gpu_charts'])
+        """Export performance data to Excel format
+        
+        Args:
+            platform (str): Target platform (Android or iOS)
+            scene (str): Test scene name
             
-            fout.write(html_content)
-        logger.info('Generating HTML success : {}'.format(html_path))  
-        return html_path
-    
-    def make_ios_html(self, scene, summary : dict, report_path=None):
-        logger.info('Generating HTML ...')
-        STATICPATH = os.path.dirname(os.path.realpath(__file__))
-        file_loader = FileSystemLoader(os.path.join(STATICPATH, 'report_template'))
-        env = Environment(loader=file_loader)
-        template = env.get_template('ios.html')
-        if report_path:
-            html_path = report_path
-        else:
-            html_path = os.path.join(self.report_dir, scene, 'report.html')
-        with open(html_path,'w+') as fout:
-            html_content = template.render(devices=summary['devices'],app=summary['app'],
-                                           platform=summary['platform'],ctime=summary['ctime'],
-                                           cpu_app=summary['cpu_app'],cpu_sys=summary['cpu_sys'],gpu=summary['gpu'],
-                                           mem_total=summary['mem_total'],fps=summary['fps'],
-                                           tem=summary['tem'],current=summary['current'],
-                                           voltage=summary['voltage'],power=summary['power'],
-                                           net_send=summary['net_send'],net_recv=summary['net_recv'],
-                                           cpu_charts=summary['cpu_charts'],mem_charts=summary['mem_charts'],
-                                           net_charts=summary['net_charts'],battery_charts=summary['battery_charts'],
-                                           fps_charts=summary['fps_charts'],gpu_charts=summary['gpu_charts'])            
-            fout.write(html_content)
-        logger.info('Generating HTML success : {}'.format(html_path))  
-        return html_path
+        Returns:
+            str: Path to the generated Excel file
+            
+        Raises:
+            ValueError: If platform or scene parameters are invalid
+            OSError: If file operations fail
+        """
+        if not platform or platform not in [Platform.Android, Platform.iOS]:
+            raise ValueError(f"Invalid platform: {platform}. Must be Android or iOS")
+        if not scene or not isinstance(scene, str):
+            raise ValueError("Scene parameter must be a non-empty string")
+            
+        try:
+            logger.info('Exporting performance data to Excel...')
+            
+            # Define log file lists based on platform
+            android_log_files = ['cpu_app', 'cpu_sys', 'mem_total', 'mem_swap',
+                               'battery_level', 'battery_tem', 'upflow', 'downflow', 'fps', 'gpu']
+            ios_log_files = ['cpu_app', 'cpu_sys', 'mem_total', 'battery_tem', 'battery_current',
+                            'battery_voltage', 'battery_power', 'upflow', 'downflow', 'fps', 'gpu']
+            log_files = android_log_files if platform == Platform.Android else ios_log_files
+            
+            # Create workbook and format headers
+            wb = xlwt.Workbook(encoding='utf-8')
+            row_count = 1
+            
+            # Process each log file
+            for name in log_files:
+                ws = wb.add_sheet(name)
+                ws.write(0, 0, 'Time')
+                ws.write(0, 1, 'Value')
+                row = 1
+                col = 0
+                
+                log_path = os.path.join(self.report_dir, scene, f'{name}.log')
+                if os.path.exists(log_path):
+                    try:
+                        with open(log_path, 'r', encoding='utf-8') as f:
+                            for line in f:
+                                target = line.strip().split('=')
+                                if len(target) == 2:  # Validate line format
+                                    for i, value in enumerate(target):
+                                        ws.write(row, col + i, value)
+                                    row += 1
+                                    row_count += 1
+                                else:
+                                    logger.warning(f"Skipping invalid line in {name}.log: {line}")
+                    except Exception as e:
+                        logger.error(f"Error processing {name}.log: {str(e)}")
+                        continue
+                
+            # Save workbook
+            xls_path = os.path.join(self.report_dir, scene, f'{scene}.xls')
+            os.makedirs(os.path.dirname(xls_path), exist_ok=True)
+            wb.save(xls_path)
+            
+            logger.info(f'Excel export completed successfully: {xls_path}')
+            return xls_path
+            
+        except Exception as e:
+            logger.error(f"Error exporting to Excel: {str(e)}")
+            logger.exception(e)
+            raise
+
+    def make_android_html(self, scene, summary: dict, report_path=None):
+        """Generate HTML report for Android performance data
+        
+        Args:
+            scene: Test scene name
+            summary: Dictionary containing performance data
+            report_path: Optional custom path for the report
+            
+        Returns:
+            str: Path to the generated HTML report
+            
+        Raises:
+            ValueError: If required data is missing in summary
+            OSError: If there are file operation errors
+        """
+        logger.info('Generating HTML report...')
+        
+        # Validate required fields
+        required_fields = ['devices', 'app', 'platform', 'ctime', 'cpu_app', 'cpu_sys', 
+                         'mem_total', 'mem_swap', 'fps', 'jank', 'level', 'tem',
+                         'net_send', 'net_recv', 'cpu_charts', 'mem_charts', 'net_charts',
+                         'battery_charts', 'fps_charts', 'jank_charts', 'mem_detail_charts',
+                         'gpu', 'gpu_charts']
+        
+        missing_fields = [field for field in required_fields if field not in summary]
+        if missing_fields:
+            raise ValueError(f"Missing required fields in summary: {', '.join(missing_fields)}")
+            
+        try:
+            STATICPATH = os.path.dirname(os.path.realpath(__file__))
+            file_loader = FileSystemLoader(os.path.join(STATICPATH, 'report_template'))
+            env = Environment(loader=file_loader)
+            template = env.get_template('android.html')
+            
+            if report_path:
+                html_path = report_path
+            else:
+                html_path = os.path.join(self.report_dir, scene, 'report.html')
+                
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(html_path), exist_ok=True)
+            
+            with open(html_path, 'w+', encoding='utf-8') as fout:
+                html_content = template.render(
+                    devices=summary['devices'],
+                    app=summary['app'],
+                    platform=summary['platform'],
+                    ctime=summary['ctime'],
+                    cpu_app=summary['cpu_app'],
+                    cpu_sys=summary['cpu_sys'],
+                    mem_total=summary['mem_total'],
+                    mem_swap=summary['mem_swap'],
+                    fps=summary['fps'],
+                    jank=summary['jank'],
+                    level=summary['level'],
+                    tem=summary['tem'],
+                    net_send=summary['net_send'],
+                    net_recv=summary['net_recv'],
+                    cpu_charts=summary['cpu_charts'],
+                    mem_charts=summary['mem_charts'],
+                    net_charts=summary['net_charts'],
+                    battery_charts=summary['battery_charts'],
+                    fps_charts=summary['fps_charts'],
+                    jank_charts=summary['jank_charts'],
+                    mem_detail_charts=summary['mem_detail_charts'],
+                    gpu=summary['gpu'],
+                    gpu_charts=summary['gpu_charts']
+                )
+                fout.write(html_content)
+                
+            logger.info(f'HTML report generated successfully: {html_path}')
+            return html_path
+            
+        except jinja2.TemplateError as e:
+            logger.error(f"Template error while generating HTML: {str(e)}")
+            raise
+        except OSError as e:
+            logger.error(f"File operation error while generating HTML: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error while generating HTML: {str(e)}")
+            logger.exception(e)
+            raise
+  
+    def make_ios_html(self, scene, summary: dict, report_path=None):
+        """Generate HTML report for iOS performance data
+        
+        Args:
+            scene: Test scene name
+            summary: Dictionary containing performance data
+            report_path: Optional custom path for the report
+            
+        Returns:
+            str: Path to the generated HTML report
+            
+        Raises:
+            ValueError: If required data is missing in summary
+            OSError: If there are file operation errors
+        """
+        logger.info('Generating HTML report...')
+        
+        # Validate required fields
+        required_fields = ['devices', 'app', 'platform', 'ctime', 'cpu_app', 'cpu_sys', 
+                         'gpu', 'mem_total', 'fps', 'tem', 'current', 'voltage', 'power',
+                         'net_send', 'net_recv', 'cpu_charts', 'mem_charts', 'net_charts',
+                         'battery_charts', 'fps_charts', 'gpu_charts']
+        
+        missing_fields = [field for field in required_fields if field not in summary]
+        if missing_fields:
+            raise ValueError(f"Missing required fields in summary: {', '.join(missing_fields)}")
+            
+        try:
+            STATICPATH = os.path.dirname(os.path.realpath(__file__))
+            file_loader = FileSystemLoader(os.path.join(STATICPATH, 'report_template'))
+            env = Environment(loader=file_loader)
+            template = env.get_template('ios.html')
+            
+            if report_path:
+                html_path = report_path
+            else:
+                html_path = os.path.join(self.report_dir, scene, 'report.html')
+                
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(html_path), exist_ok=True)
+            
+            with open(html_path, 'w+', encoding='utf-8') as fout:
+                html_content = template.render(
+                    devices=summary['devices'],
+                    app=summary['app'],
+                    platform=summary['platform'],
+                    ctime=summary['ctime'],
+                    cpu_app=summary['cpu_app'],
+                    cpu_sys=summary['cpu_sys'],
+                    gpu=summary['gpu'],
+                    mem_total=summary['mem_total'],
+                    fps=summary['fps'],
+                    tem=summary['tem'],
+                    current=summary['current'],
+                    voltage=summary['voltage'],
+                    power=summary['power'],
+                    net_send=summary['net_send'],
+                    net_recv=summary['net_recv'],
+                    cpu_charts=summary['cpu_charts'],
+                    mem_charts=summary['mem_charts'],
+                    net_charts=summary['net_charts'],
+                    battery_charts=summary['battery_charts'],
+                    fps_charts=summary['fps_charts'],
+                    gpu_charts=summary['gpu_charts']
+                )
+                fout.write(html_content)
+                
+            logger.info(f'HTML report generated successfully: {html_path}')
+            return html_path
+            
+        except jinja2.TemplateError as e:
+            logger.error(f"Template error while generating HTML: {str(e)}")
+            raise
+        except OSError as e:
+            logger.error(f"File operation error while generating HTML: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error while generating HTML: {str(e)}")
+            logger.exception(e)
+            raise
   
     def filter_secen(self, scene):
-        dirs = os.listdir(self.report_dir)
-        dir_list = list(reversed(sorted(dirs, key=lambda x: os.path.getmtime(os.path.join(self.report_dir, x)))))
-        dir_list.remove(scene)
-        return dir_list
+        """Filter out the current scene from the list of report directories"""
+        try:
+            dirs = os.listdir(self.report_dir)
+            dir_list = list(reversed(sorted(dirs, key=lambda x: os.path.getmtime(os.path.join(self.report_dir, x)))))
+            if scene in dir_list:
+                dir_list.remove(scene)
+            return dir_list
+        except OSError as e:
+            logger.error(f"Error accessing report directory: {str(e)}")
+            return []
 
     def get_repordir(self):
+        """Get or create the report directory"""
         report_dir = os.path.join(os.getcwd(), 'report')
-        if not os.path.exists(report_dir):
-            os.mkdir(report_dir)
-        return report_dir
+        try:
+            os.makedirs(report_dir, exist_ok=True)
+            return report_dir
+        except OSError as e:
+            logger.error(f"Error creating report directory: {str(e)}")
+            raise
 
     def create_file(self, filename, content=''):
-        if not os.path.exists(self.report_dir):
-            os.mkdir(self.report_dir)
-        with open(os.path.join(self.report_dir, filename), 'a+', encoding="utf-8") as file:
-            file.write(content)
+        """Create a new file in the report directory with optional content"""
+        try:
+            os.makedirs(self.report_dir, exist_ok=True)
+            file_path = os.path.join(self.report_dir, filename)
+            with open(file_path, 'a+', encoding="utf-8") as file:
+                file.write(content)
+        except OSError as e:
+            logger.error(f"Error creating file {filename}: {str(e)}")
+            raise
 
     def add_log(self, path, log_time, value):
+        """Add a timestamped log entry if the value is valid"""
         if value >= 0:
-            with open(path, 'a+', encoding="utf-8") as file:
-                file.write(f'{log_time}={str(value)}' + '\n')
+            try:
+                with open(path, 'a+', encoding="utf-8") as file:
+                    file.write(f'{log_time}={str(value)}\n')
+            except OSError as e:
+                logger.error(f"Error writing to log file {path}: {str(e)}")
     
-    def record_net(self, type, send , recv):
+    def record_net(self, type, send, recv):
         net_dict = dict()
-        match(type):
-            case 'pre':
-                net_dict['send'] = send
-                net_dict['recv'] = recv
-                content = json.dumps(net_dict)
-                self.create_file(filename='pre_net.json', content=content)
-            case 'end':
-                net_dict['send'] = send
-                net_dict['recv'] = recv
-                content = json.dumps(net_dict)
-                self.create_file(filename='end_net.json', content=content)
-            case _:
-                logger.error('record network data failed')
+        if type == 'pre':
+            net_dict['send'] = send
+            net_dict['recv'] = recv
+            with open(os.path.join(os.getcwd(), 'report/net.json'), 'w') as f:
+                json.dump(net_dict, f)
+        elif type == 'next':
+            with open(os.path.join(os.getcwd(), 'report/net.json'), 'r') as f:
+                pre_net = json.load(f)
+                net_dict['send'] = send - pre_net['send']
+                net_dict['recv'] = recv - pre_net['recv']
+        else:
+            logger.error(f"Unsupported network record type: {type}")
+            raise ValueError(f"Unsupported network record type: {type}. Only 'pre' and 'next' are supported.")
+        return net_dict
     
     def make_report(self, app, devices, video, platform=Platform.Android, model='normal', cores=0):
-        logger.info('Generating test results ...')
-        current_time = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
-        result_dict = {
-            "app": app,
-            "icon": "",
-            "platform": platform,
-            "model": model,
-            "devices": devices,
-            "ctime": current_time,
-            "video": video,
-            "cores":cores
-        }
-        content = json.dumps(result_dict)
-        self.create_file(filename='result.json', content=content)
-        report_new_dir = os.path.join(self.report_dir, f'apm_{current_time}')
-        if not os.path.exists(report_new_dir):
-            os.mkdir(report_new_dir)
-
-        for f in os.listdir(self.report_dir):
-            filename = os.path.join(self.report_dir, f)
-            if f.split(".")[-1] in ['log', 'json', 'mkv']:
-                shutil.move(filename, report_new_dir)        
-        logger.info('Generating test results success: {}'.format(report_new_dir))
-        return f'apm_{current_time}'        
+        """Generate a test report with performance data and metadata
+        
+        Args:
+            app (str): Application name or identifier
+            devices (str): Device information
+            video (str): Path to recorded video file
+            platform (Platform): Target platform (Android or iOS)
+            model (str): Test model type, defaults to 'normal'
+            cores (int): Number of CPU cores, defaults to 0
+            
+        Returns:
+            str: Name of the report directory (format: apm_YYYY-MM-DD-HH-MM-SS)
+            
+        Raises:
+            ValueError: If required parameters are invalid
+            OSError: If directory creation or file operations fail
+        """
+        if not app or not isinstance(app, str):
+            raise ValueError("App parameter must be a non-empty string")
+        if not devices or not isinstance(devices, str):
+            raise ValueError("Devices parameter must be a non-empty string")
+        if not isinstance(platform, str) or platform not in [Platform.Android, Platform.iOS]:
+            raise ValueError(f"Invalid platform: {platform}. Must be Android or iOS")
+            
+        try:
+            logger.info('Generating performance test report...')
+            current_time = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
+            report_dir_name = f'apm_{current_time}'
+            
+            # Prepare result dictionary
+            result_dict = {
+                "app": app,
+                "icon": "",
+                "platform": platform,
+                "model": model,
+                "devices": devices,
+                "ctime": current_time,
+                "video": video,
+                "cores": cores
+            }
+            
+            # Create result.json
+            try:
+                content = json.dumps(result_dict)
+                self.create_file(filename='result.json', content=content)
+            except Exception as e:
+                logger.error(f"Failed to create result.json: {str(e)}")
+                raise
+            
+            # Create and setup report directory
+            report_new_dir = os.path.join(self.report_dir, report_dir_name)
+            try:
+                os.makedirs(report_new_dir, exist_ok=True)
+            except OSError as e:
+                logger.error(f"Failed to create report directory: {str(e)}")
+                raise
+            
+            # Move relevant files to report directory
+            moved_files = []
+            for f in os.listdir(self.report_dir):
+                filename = os.path.join(self.report_dir, f)
+                if os.path.isfile(filename) and f.split(".")[-1] in ['log', 'json', 'mkv']:
+                    try:
+                        shutil.move(filename, report_new_dir)
+                        moved_files.append(f)
+                    except OSError as e:
+                        logger.warning(f"Failed to move file {f}: {str(e)}")
+            
+            logger.info(f'Report generated successfully: {report_new_dir}')
+            logger.debug(f'Moved {len(moved_files)} files to report directory')
+            return report_dir_name
+            
+        except Exception as e:
+            logger.error(f"Error generating report: {str(e)}")
+            logger.exception(e)
+            raise
 
     def instance_type(self, data):
         if isinstance(data, float):
@@ -413,15 +756,30 @@ class File:
             return 'int'
     
     def open_file(self, path, mode):
-        with open(path, mode) as f:
-            for line in f:
-                yield line
+        """Generator to read file lines efficiently"""
+        try:
+            with open(path, mode) as f:
+                for line in f:
+                    yield line
+        except OSError as e:
+            logger.error(f"Error reading file {path}: {str(e)}")
+            return
     
     def readJson(self, scene):
-        path = os.path.join(self.report_dir,scene,'result.json')
-        result_json = open(file=path, mode='r').read()
-        result_dict = json.loads(result_json)
-        return result_dict
+        """Read and parse the result.json file for a given scene"""
+        path = os.path.join(self.report_dir, scene, 'result.json')
+        try:
+            with open(path, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            logger.error(f"Result file not found for scene {scene}")
+            return {}
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in result file for scene {scene}: {str(e)}")
+            return {}
+        except Exception as e:
+            logger.error(f"Error reading result file for scene {scene}: {str(e)}")
+            return {}
 
     def readLog(self, scene, filename):
         """Read apmlog file data"""
@@ -523,12 +881,7 @@ class File:
             targetDic['batteryTem'] = self.readLog(scene=scene, filename='battery_tem.log')[0]
             targetDic['batteryCurrent'] = self.readLog(scene=scene, filename='battery_current.log')[0]
             targetDic['batteryVoltage'] = self.readLog(scene=scene, filename='battery_voltage.log')[0]
-            targetDic['batteryPower'] = self.readLog(scene=scene, filename='battery_power.log')[0]
-            result = {'status': 1, 
-                      'batteryTem': targetDic['batteryTem'], 
-                      'batteryCurrent': targetDic['batteryCurrent'],
-                      'batteryVoltage': targetDic['batteryVoltage'], 
-                      'batteryPower': targetDic['batteryPower']}    
+            targetDic['batteryPower'] = self.readLog(scene=scene, filename='battery_power.log')[0]    
         return result
     
     def getBatteryLogCompare(self, platform, scene1, scene2):
@@ -867,195 +1220,3 @@ class File:
         apm_dict['fpsAvg1'] = fpsAvg1
         apm_dict['fpsAvg2'] = fpsAvg2
         return apm_dict
-
-class Method:
-    
-    @classmethod
-    def _request(cls, request, object):
-        match(request.method):
-            case 'POST':
-                return request.form[object]
-            case 'GET':
-                return request.args[object]
-            case _:
-                raise Exception('request method error')
-    
-    @classmethod   
-    def _setValue(cls, value, default = 0):
-        try:
-            result = value
-        except ZeroDivisionError :
-            result = default
-        except IndexError:
-            result = default        
-        except Exception:
-            result = default            
-        return result
-    
-    @classmethod
-    def _settings(cls, request):
-        content = {}
-        content['cpuWarning'] = (0, request.cookies.get('cpuWarning'))[request.cookies.get('cpuWarning') not in [None, 'NaN']]
-        content['memWarning'] = (0, request.cookies.get('memWarning'))[request.cookies.get('memWarning') not in [None, 'NaN']]
-        content['fpsWarning'] = (0, request.cookies.get('fpsWarning'))[request.cookies.get('fpsWarning') not in [None, 'NaN']]
-        content['netdataRecvWarning'] = (0, request.cookies.get('netdataRecvWarning'))[request.cookies.get('netdataRecvWarning') not in [None, 'NaN']]
-        content['netdataSendWarning'] = (0, request.cookies.get('netdataSendWarning'))[request.cookies.get('netdataSendWarning') not in [None, 'NaN']]
-        content['betteryWarning'] = (0, request.cookies.get('betteryWarning'))[request.cookies.get('betteryWarning') not in [None, 'NaN']]
-        content['gpuWarning'] = (0, request.cookies.get('gpuWarning'))[request.cookies.get('gpuWarning') not in [None, 'NaN']]
-        content['duration'] = (0, request.cookies.get('duration'))[request.cookies.get('duration') not in [None, 'NaN']]
-        content['solox_host'] = ('', request.cookies.get('solox_host'))[request.cookies.get('solox_host') not in [None, 'NaN']]
-        content['host_switch'] = request.cookies.get('host_switch')
-        return content
-    
-    @classmethod
-    def _index(cls, target: list, index: int, default: any):
-        try:
-            return target[index]
-        except IndexError:
-            return default
-
-class Install:
-
-    def uploadFile(self, file_path, file_obj):
-        """save upload file"""
-        try:
-            file_obj.save(file_path)
-            return True
-        except Exception as e:
-            logger.exception(e)
-            return False            
-
-    def downloadLink(self,filelink=None, path=None, name=None):
-        try:
-            logger.info('Install link : {}'.format(filelink))
-            ssl._create_default_https_context = ssl._create_unverified_context
-            file_size = int(urlopen(filelink).info().get('Content-Length', -1))
-            header = {"Range": "bytes=%s-%s" % (0, file_size)}
-            pbar = tqdm(
-                total=file_size, initial=0,
-                unit='B', unit_scale=True, desc=filelink.split('/')[-1])
-            req = requests.get(filelink, headers=header, stream=True)
-            with(open(os.path.join(path, name), 'ab')) as f:
-                for chunk in req.iter_content(chunk_size=1024):
-                    if chunk:
-                         f.write(chunk)
-                         pbar.update(1024)
-            pbar.close()
-            return True
-        except Exception as e:
-            logger.exception(e)
-            return False
-
-    def installAPK(self, path):
-        result = adb.shell_noDevice(cmd='install -r {}'.format(path))
-        if result == 0:
-            os.remove(path)
-            return True, result
-        else:
-            return False, result
-
-    def installIPA(self, path):
-        result = os.system('tidevice install {}'.format(path))
-        if result == 0:
-            os.remove(path)
-            return True, result
-        else:
-            return False, result
-
-class Scrcpy:
-
-    STATICPATH = os.path.dirname(os.path.realpath(__file__))
-    DEFAULT_SCRCPY_PATH = {
-        "64": os.path.join(STATICPATH, "scrcpy", "scrcpy-win64-v2.4", "scrcpy.exe"),
-        "32": os.path.join(STATICPATH, "scrcpy", "scrcpy-win32-v2.4", "scrcpy.exe"),
-        "default":"scrcpy"
-    }
-    
-    @classmethod
-    def scrcpy_path(cls):
-        bit = platform.architecture()[0]
-        path = cls.DEFAULT_SCRCPY_PATH["default"]
-        if platform.system().lower().__contains__('windows'):
-            if bit.__contains__('64'):
-                path =  cls.DEFAULT_SCRCPY_PATH["64"]
-            elif bit.__contains__('32'):
-                path =  cls.DEFAULT_SCRCPY_PATH["32"]
-        return path
-    
-    @classmethod
-    def start_record(cls, device):
-        f = File()
-        logger.info('start record screen')
-        win_cmd = "start /b {scrcpy_path} -s {deviceId} --no-playback --record={video}".format(
-            scrcpy_path = cls.scrcpy_path(), 
-            deviceId = device, 
-            video = os.path.join(f.report_dir, 'record.mkv')
-        )
-        mac_cmd = "nohup {scrcpy_path} -s {deviceId} --no-playback --record={video} &".format(
-            scrcpy_path = cls.scrcpy_path(), 
-            deviceId = device, 
-            video = os.path.join(f.report_dir, 'record.mkv')
-        )
-        if platform.system().lower().__contains__('windows'):
-            result = os.system(win_cmd)
-        else:
-            result = os.system(mac_cmd)    
-        if result == 0:
-            logger.info("record screen success : {}".format(os.path.join(f.report_dir, 'record.mkv')))
-        else:
-            logger.error("solox's scrcpy is incompatible with your PC")
-            logger.info("Please install the software yourself : brew install scrcpy")    
-        return result
-    
-    @classmethod
-    def stop_record(cls):
-        logger.info('stop scrcpy process')
-        pids = psutil.pids()
-        try:
-            for pid in pids:
-                p = psutil.Process(pid)
-                if p.name().__contains__('scrcpy'):
-                    os.kill(pid, signal.SIGABRT)
-                    logger.info(pid)
-        except Exception as e:
-            logger.exception(e)
-    
-    @classmethod
-    def cast_screen(cls, device):
-        logger.info('start cast screen')
-        win_cmd = "start /i {scrcpy_path} -s {deviceId} --stay-awake".format(
-            scrcpy_path = cls.scrcpy_path(), 
-            deviceId = device
-        )
-        mac_cmd = "nohup {scrcpy_path} -s {deviceId} --stay-awake &".format(
-            scrcpy_path = cls.scrcpy_path(), 
-            deviceId = device
-        )
-        if platform.system().lower().__contains__('windows'):
-            result = os.system(win_cmd)
-        else:
-            result = os.system(mac_cmd)
-        if result == 0:
-            logger.info("cast screen success")
-        else:
-            logger.error("solox's scrcpy is incompatible with your PC")
-            logger.info("Please install the software yourself : brew install scrcpy")    
-        return result
-    
-    @classmethod
-    def play_video(cls, video):
-        logger.info('start play video : {}'.format(video))
-        cap = cv2.VideoCapture(video)
-        while(cap.isOpened()):
-            ret, frame = cap.read()
-            if ret:
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                cv2.namedWindow("frame", 0)  
-                cv2.resizeWindow("frame", 430, 900)
-                cv2.imshow('frame', gray)
-                if cv2.waitKey(25) & 0xFF == ord('q') or not cv2.getWindowProperty("frame", cv2.WND_PROP_VISIBLE):
-                    break
-            else:
-                break
-        cap.release()
-        cv2.destroyAllWindows()

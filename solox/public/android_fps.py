@@ -8,6 +8,7 @@ import traceback
 from logzero import logger
 from solox.public.adb import adb
 from solox.public.common import Devices
+import subprocess
 
 d = Devices()
 
@@ -58,6 +59,7 @@ class SurfaceStatsCollector(object):
                 self.fps_queue.task_done()
 
     def get_surfaceview(self):
+        """Get the SurfaceView activity name for the package"""
         activity_name = ''
         activity_line = ''
         try:
@@ -70,15 +72,15 @@ class SurfaceStatsCollector(object):
 
             activity_name = dumpsys_result_list[len(dumpsys_result_list) - 1]
             if not activity_name.__contains__(self.package_name):
-                logger.error('get activity name failed, Please provide SurfaceFlinger --list information to the author')
-                logger.info('dumpsys SurfaceFlinger --list info: {}'.format(dumpsys_result))
-        except Exception:
-            traceback.print_exc()
-            logger.error('get activity name failed, Please provide SurfaceFlinger --list information to the author')
-            logger.info('dumpsys SurfaceFlinger --list info: {}'.format(dumpsys_result))
+                logger.error('Unable to get activity name. Please provide SurfaceFlinger --list information to the developer')
+                logger.info(f'dumpsys SurfaceFlinger --list info: {dumpsys_result}')
+        except Exception as e:
+            logger.error(f'Error getting activity name: {str(e)}')
+            logger.info(f'dumpsys SurfaceFlinger --list info: {dumpsys_result}')
         return activity_name            
      
     def get_surfaceview_activity(self):
+        """Extract the activity name from SurfaceView information"""
         activity_name = ''
         activity_line = ''
         try:
@@ -89,19 +91,18 @@ class SurfaceStatsCollector(object):
                     activity_line = line.strip()
                     break
             if activity_line:
-                if activity_line.find(' ')  != -1:      
+                if activity_line.find(' ') != -1:      
                     activity_name = activity_line.split(' ')[2]
                 else:
                     activity_name = activity_line.replace('SurfaceView','').replace('[','').replace(']','').replace('-','').strip()    
             else:
                 activity_name = dumpsys_result_list[len(dumpsys_result_list) - 1]
                 if not activity_name.__contains__(self.package_name):
-                    logger.error('get activity name failed, Please provide SurfaceFlinger --list information to the author')
-                    logger.info('dumpsys SurfaceFlinger --list info: {}'.format(dumpsys_result))
-        except Exception:
-            traceback.print_exc()
-            logger.error('get activity name failed, Please provide SurfaceFlinger --list information to the author')
-            logger.info('dumpsys SurfaceFlinger --list info: {}'.format(dumpsys_result))
+                    logger.error('Unable to get activity name. Please provide SurfaceFlinger --list information to the developer')
+                    logger.info(f'dumpsys SurfaceFlinger --list info: {dumpsys_result}')
+        except Exception as e:
+            logger.error(f'Error getting activity name: {str(e)}')
+            logger.info(f'dumpsys SurfaceFlinger --list info: {dumpsys_result}')
         return activity_name
      
     def get_focus_activity(self):
@@ -266,37 +267,50 @@ class SurfaceStatsCollector(object):
                         self.data_queue.put(surface_state)
                 else:
                     timestamps = []
-                    refresh_period, new_timestamps = self._get_surfaceflinger_frame_data()
-                    if refresh_period is None or new_timestamps is None:
-                        self.focus_window = self.get_focus_activity()
-                        logger.warning("refresh_period is None or timestamps is None")
-                        continue
-                    timestamps += [timestamp for timestamp in new_timestamps
-                                   if timestamp[1] > self.last_timestamp]
-                    if len(timestamps):
-                        first_timestamp = [[0, self.last_timestamp, 0]]
-                        if not is_first:
-                            timestamps = first_timestamp + timestamps
-                        self.last_timestamp = timestamps[-1][1]
-                        is_first = False
-                    else:
-                        is_first = True
-                        cur_focus_window = self.get_focus_activity()
-                        if self.focus_window != cur_focus_window:
-                            self.focus_window = cur_focus_window
+                    try:
+                        refresh_period, new_timestamps = self._get_surfaceflinger_frame_data()
+                        if refresh_period is None or new_timestamps is None:
+                            self.focus_window = self.get_focus_activity()
+                            logger.warning("refresh_period is None or timestamps is None")
                             continue
-                    self.data_queue.put((refresh_period, timestamps, time.time()))
-                    time_consume = time.time() - before
-                    delta_inter = self.frequency - time_consume
-                    if delta_inter > 0:
-                        time.sleep(delta_inter)
-            except:
-                logger.error("an exception hanpend in fps _collector_thread , reason unkown!")
-                s = traceback.format_exc()
-                logger.debug(s)
+                        
+                        timestamps += [timestamp for timestamp in new_timestamps
+                                   if timestamp[1] > self.last_timestamp]
+                        
+                        if len(timestamps):
+                            first_timestamp = [[0, self.last_timestamp, 0]]
+                            if not is_first:
+                                timestamps = first_timestamp + timestamps
+                            self.last_timestamp = timestamps[-1][1]
+                            is_first = False
+                        else:
+                            is_first = True
+                            cur_focus_window = self.get_focus_activity()
+                            if self.focus_window != cur_focus_window:
+                                self.focus_window = cur_focus_window
+                                logger.info(f"Focus window changed to: {cur_focus_window}")
+                                continue
+                        
+                        self.data_queue.put((refresh_period, timestamps, time.time()))
+                    except (IndexError, TypeError) as e:
+                        logger.error(f"Error processing frame data: {str(e)}")
+                        continue
+                    
+                time_consume = time.time() - before
+                delta_inter = self.frequency - time_consume
+                if delta_inter > 0:
+                    time.sleep(delta_inter)
+            except (OSError, subprocess.SubprocessError) as e:
+                logger.error(f"System error in FPS collector: {str(e)}")
+                logger.debug(traceback.format_exc())
                 if self.fps_queue:
                     self.fps_queue.task_done()
-        self.data_queue.put(u'Stop')
+            except Exception as e:
+                logger.error(f"Unexpected error in FPS collector: {str(e)}")
+                logger.debug(traceback.format_exc())
+                if self.fps_queue:
+                    self.fps_queue.task_done()
+        self.data_queue.put('Stop')
 
     def _clear_surfaceflinger_latency_data(self):
         """Clears the SurfaceFlinger latency data.
@@ -315,8 +329,16 @@ class SurfaceStatsCollector(object):
         return not len(results)
 
     def get_sdk_version(self):
-        sdk_version = int(adb.shell(cmd='getprop ro.build.version.sdk', deviceId=self.device))
-        return sdk_version
+        """Get the Android SDK version of the device"""
+        try:
+            sdk_version = int(adb.shell(cmd='getprop ro.build.version.sdk', deviceId=self.device))
+            return sdk_version
+        except (ValueError, TypeError) as e:
+            logger.error(f"Error parsing SDK version: {str(e)}")
+            return 0
+        except Exception as e:
+            logger.error(f"Error getting SDK version: {str(e)}")
+            return 0
 
     def _get_surfaceflinger_frame_data(self):
         """Returns collected SurfaceFlinger frame timing data.
@@ -471,35 +493,54 @@ class Monitor(object):
         self.matched_data = {}
 
     def start(self):
-        logger.warn("请在%s类中实现start方法" % type(self))
+        logger.warn("Please implement start method in %s class" % type(self))
 
     def clear(self):
         self.matched_data = {}
 
     def stop(self):
-        logger.warning("请在%s类中实现stop方法" % type(self))
+        logger.warning("Please implement stop method in %s class" % type(self))
 
     def save(self):
-        logger.warning("请在%s类中实现save方法" % type(self))
+        logger.warning("Please implement save method in %s class" % type(self))
 
 
 class TimeUtils(object):
+    """Utility class for time formatting"""
     UnderLineFormatter = "%Y_%m_%d_%H_%M_%S"
     NormalFormatter = "%Y-%m-%d %H-%M-%S"
     ColonFormatter = "%Y-%m-%d %H:%M:%S"
 
     @staticmethod
     def getCurrentTimeUnderline():
+        """Get current time in underscore format
+        
+        Returns:
+            str: Current time formatted with underscores
+        """
         return time.strftime(TimeUtils.UnderLineFormatter, time.localtime(time.time()))
 
 
 class FPSMonitor(Monitor):
     def __init__(self, device_id, package_name=None, frequency=1.0, timeout=24 * 60 * 60, fps_queue=None,
                  jank_threshold=166, use_legacy=False, surfaceview=True, start_time=None, **kwargs):
+        """Initialize FPS Monitor
+        
+        Args:
+            device_id: Device identifier
+            package_name: Application package name
+            frequency: Sampling frequency in seconds
+            timeout: Maximum monitoring time in seconds
+            fps_queue: Queue for FPS data
+            jank_threshold: Threshold for detecting frame jank in milliseconds
+            use_legacy: Whether to use legacy method for older Android versions
+            surfaceview: Whether to monitor SurfaceView
+            start_time: Start time for monitoring
+        """
         super().__init__(**kwargs)
         self.start_time = start_time
         self.use_legacy = use_legacy
-        self.frequency = frequency  # 取样频率
+        self.frequency = frequency  # Sampling frequency
         self.jank_threshold = jank_threshold
         self.device = device_id
         self.timeout = timeout
@@ -509,19 +550,42 @@ class FPSMonitor(Monitor):
                                                   self.jank_threshold, self.surfaceview, self.use_legacy)
 
     def start(self):
-        self.fpscollector.start(self.start_time)
+        """Start FPS monitoring"""
+        try:
+            self.fpscollector.start(self.start_time)
+        except Exception as e:
+            logger.error(f"Error starting FPS monitoring: {str(e)}")
+            logger.exception(e)
+            raise
 
     def stop(self):
+        """Stop FPS monitoring and return results
+        
+        Returns:
+            tuple: (fps, jank_count) - Current FPS and jank frame count
+        """
         global collect_fps
         global collect_jank
-        self.fpscollector.stop()
-        return collect_fps, collect_jank
+        try:
+            self.fpscollector.stop()
+            return collect_fps, collect_jank
+        except Exception as e:
+            logger.error(f"Error stopping FPS monitoring: {str(e)}")
+            logger.exception(e)
+            return 0, 0
 
     def save(self):
+        """Save monitoring results (to be implemented by subclasses)"""
         pass
 
     def parse(self, file_path):
+        """Parse monitoring results from file (to be implemented by subclasses)"""
         pass
 
     def get_fps_collector(self):
+        """Get the FPS collector instance
+        
+        Returns:
+            SurfaceStatsCollector: The FPS collector instance
+        """
         return self.fpscollector

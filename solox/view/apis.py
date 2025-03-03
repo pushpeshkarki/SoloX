@@ -368,8 +368,12 @@ def getNetWorkData():
                 network = Network(pkgName=pkgname, deviceId=deviceId, platform=platform, pid=pid)
                 data = network.getNetWorkData(wifi=wifi,noLog=False)
                 result = {'status': 1, 'upflow': data[0], 'downflow': data[1]}
+    except (ValueError, TypeError) as e:
+        logger.error(f'get network data failed: {str(e)}')
+        logger.exception(e)
+        result = {'status': 1, 'upflow': 0, 'downflow': 0, 'first': 0, 'second': 0}
     except Exception as e:
-        logger.error('get network data failed')
+        logger.error(f'Unexpected error in network data retrieval: {str(e)}')
         logger.exception(e)
         result = {'status': 1, 'upflow': 0, 'downflow': 0, 'first': 0, 'second': 0}
     return result
