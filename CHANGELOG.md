@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.9.0] - 2024-03-20
+## [2.9.1] - 2025-03-03
 
 ### Added
 - Enhanced device management system
