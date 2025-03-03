@@ -1,0 +1,72 @@
+name: SoloX CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ['3.8', '3.9', '3.10']
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov
+        
+    - name: Run unit tests
+      run: |
+        pytest tests/device_management/test_device_pool.py tests/device_management/test_device_manager.py -v --cov=solox.device_management
+        
+    - name: Run integration tests (if devices available)
+      run: |
+        pytest tests/device_management/test_integration.py -v || echo "No devices available for integration testing"
+      continue-on-error: true
+      
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      with:
+        fail_ci_if_error: false
+
+  lint:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        
+    - name: Install linting tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 black isort mypy
+        
+    - name: Check code formatting
+      run: |
+        black --check solox/device_management
+        isort --check-only solox/device_management
+        
+    - name: Lint with flake8
+      run: |
+        flake8 solox/device_management --count --max-complexity=10 --max-line-length=100 --statistics
+        
+    - name: Type check with mypy
+      run: |
+        mypy solox/device_management 
